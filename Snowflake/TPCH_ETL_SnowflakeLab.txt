@@ -1,0 +1,378 @@
+-- Snowflake Hands-on Lab
+-- Anastasiia Karpushkina
+
+USE ROLE ACCOUNTADMIN;
+USE WAREHOUSE COMPUTE_WH;
+
+-- 1.Database Creation
+
+CREATE DATABASE LAB;
+USE DATABSE LAB;
+
+-- 2. Loading Data into Internal Stage
+
+-- Create Internal Stage
+CREATE OR REPLACE STAGE LAB.PUBLIC.TPCH_DATA;
+
+-- Create File Formats
+CREATE OR REPLACE FILE FORMAT "LAB"."PUBLIC".CSV_VERTICAL 
+COMPRESSION = 'AUTO' 
+FIELD_DELIMITER = '|' 
+RECORD_DELIMITER = '\n' 
+SKIP_HEADER = 1 
+FIELD_OPTIONALLY_ENCLOSED_BY = '\042' 
+TRIM_SPACE = TRUE 
+ERROR_ON_COLUMN_COUNT_MISMATCH = FALSE 
+ESCAPE = 'NONE' 
+ESCAPE_UNENCLOSED_FIELD = '\134' 
+DATE_FORMAT = 'DD-MM-YY' 
+TIMESTAMP_FORMAT = 'AUTO' 
+NULL_IF = ('\\N');
+
+CREATE OR REPLACE FILE FORMAT "LAB"."PUBLIC".CSV_COMMAS 
+COMPRESSION = 'AUTO' 
+FIELD_DELIMITER = ',' 
+RECORD_DELIMITER = '\n' 
+SKIP_HEADER = 1 
+FIELD_OPTIONALLY_ENCLOSED_BY = '\042' 
+TRIM_SPACE = TRUE 
+ERROR_ON_COLUMN_COUNT_MISMATCH = FALSE 
+ESCAPE = 'NONE' 
+ESCAPE_UNENCLOSED_FIELD = '\134' 
+DATE_FORMAT = 'AUTO' 
+TIMESTAMP_FORMAT = 'AUTO' 
+NULL_IF = ('\\N');
+    
+-- Loading Local Flat Files using SnowSQL CLI
+--put file://C:\Users\Anastasiia\tpch_data\h_region.csv @TPCH_DATA;
+
+LIST @TPCH_DATA;
+
+-- 3. ETL Data Workflow
+
+-- Create Schemas
+
+CREATE SCHEMA LAB.CORE_DWH;
+CREATE SCHEMA LAB.DATA_MART;
+
+USE SCHEMA LAB.PUBLIC;
+
+-- Create tables for CORE_DWH schema
+CREATE OR REPLACE TABLE LAB.CORE_DWH.region
+(
+  r_regionkey INTEGER PRIMARY KEY not null,
+  r_name      CHAR(25),
+  r_comment   VARCHAR(152)
+);
+
+CREATE OR REPLACE TABLE LAB.CORE_DWH.nation
+(
+  n_nationkey INTEGER PRIMARY KEY not null,
+  n_name      CHAR(27),
+  n_regionkey INTEGER REFERENCES LAB.CORE_DWH.region(r_regionkey),
+  n_comment   VARCHAR(155)
+);
+
+CREATE OR REPLACE TABLE LAB.CORE_DWH.supplier
+(
+  s_suppkey   INTEGER PRIMARY KEY not null,
+  s_name      CHAR(25),
+  s_address   VARCHAR(40),
+  s_nationkey INTEGER REFERENCES LAB.CORE_DWH.nation(n_nationkey),
+  s_phone     CHAR(15),
+  s_acctbal   FLOAT8,
+  s_comment   VARCHAR(101)
+);
+
+CREATE OR REPLACE TABLE LAB.CORE_DWH.part
+(
+  p_partkey     INTEGER PRIMARY KEY not null,
+  p_name        VARCHAR(55),
+  p_mfgr        CHAR(25),
+  p_brand       CHAR(10),
+  p_type        VARCHAR(25),
+  p_size        INTEGER,
+  p_container   CHAR(10),
+  p_retailprice INTEGER,
+  p_comment     VARCHAR(23)
+);
+
+CREATE OR REPLACE TABLE LAB.CORE_DWH.partsupp
+(
+  ps_partkey    INTEGER REFERENCES LAB.CORE_DWH.part(p_partkey) not null,
+  ps_suppkey    INTEGER REFERENCES LAB.CORE_DWH.supplier(s_suppkey) not null,
+  ps_availqty   INTEGER,
+  ps_supplycost FLOAT8 not null,
+  ps_comment    VARCHAR(199),
+  constraint pk_parpsupp PRIMARY KEY (ps_partkey, ps_suppkey)
+);
+
+CREATE OR REPLACE TABLE LAB.CORE_DWH.customer
+(
+  c_custkey    INTEGER PRIMARY KEY not null,
+  c_name       VARCHAR(25),
+  c_address    VARCHAR(40),
+  c_nationkey  INTEGER REFERENCES LAB.CORE_DWH.nation(n_nationkey),
+  c_phone      CHAR(15),
+  c_acctbal    FLOAT8,
+  c_mktsegment CHAR(10),
+  c_comment    VARCHAR(117)
+);
+
+CREATE OR REPLACE TABLE LAB.CORE_DWH.orders
+(
+  o_orderkey      INTEGER PRIMARY KEY not null,
+  o_custkey       INTEGER REFERENCES LAB.CORE_DWH.customer(c_custkey) not null,
+  o_orderstatus   CHAR(1),
+  o_totalprice    FLOAT8,
+  o_orderdate     DATE,
+  o_orderpriority CHAR(15),
+  o_clerk         CHAR(15),
+  o_shippriority  INTEGER,
+  o_comment       VARCHAR(79)
+);
+
+CREATE OR REPLACE TABLE LAB.CORE_DWH.lineitem
+(
+  l_orderkey      INTEGER REFERENCES LAB.CORE_DWH.orders(o_orderkey) not null,
+  l_partkey       INTEGER not null,
+  l_suppkey       INTEGER not null,
+  l_linenumber    INTEGER PRIMARY KEY not null,
+  l_quantity      INTEGER not null,
+  l_extendedprice FLOAT8 not null,
+  l_discount      FLOAT8 not null,
+  l_tax           FLOAT8 not null,
+  l_returnflag    CHAR(1),
+  l_linestatus    CHAR(1),
+  l_shipdate      DATE,
+  l_commitdate    DATE,
+  l_receiptdate   DATE,
+  l_shipinstruct  CHAR(25),
+  l_shipmode      CHAR(10),
+  l_comment       VARCHAR(44),
+  constraint fk_partsupp foreign key (l_partkey, l_suppkey) references  LAB.CORE_DWH.partsupp(ps_partkey, ps_suppkey)
+);
+
+-- Create Table Streams for source tables
+CREATE OR REPLACE STREAM new_region ON TABLE LAB.CORE_DWH.region;
+CREATE OR REPLACE STREAM new_nation ON TABLE LAB.CORE_DWH.nation;
+CREATE OR REPLACE STREAM new_supplier ON TABLE LAB.CORE_DWH.supplier;
+CREATE OR REPLACE STREAM new_orders ON TABLE LAB.CORE_DWH.orders;
+CREATE OR REPLACE STREAM new_partsupp ON TABLE LAB.CORE_DWH.partsupp;
+CREATE OR REPLACE STREAM new_part ON TABLE LAB.CORE_DWH.part;
+CREATE OR REPLACE STREAM new_customer ON TABLE LAB.CORE_DWH.customer;
+CREATE OR REPLACE STREAM new_lineitem ON TABLE LAB.CORE_DWH.lineitem;
+
+-- Create a Stored Procedure to Load Data from Internal Stage to CORE_DWH
+CREATE OR REPLACE PROCEDURE load_coredwh()
+returns string
+language javascript
+execute as owner
+as
+$$
+try {
+  //truncate tables before loading
+    snowflake.execute( {sqlText: "truncate table LAB.CORE_DWH.region"}); 
+    snowflake.execute( {sqlText: "truncate table LAB.CORE_DWH.nation"}); 
+    snowflake.execute( {sqlText: "truncate table LAB.CORE_DWH.supplier"});
+    snowflake.execute( {sqlText: "truncate table LAB.CORE_DWH.orders"});
+    snowflake.execute( {sqlText: "truncate table LAB.CORE_DWH.partsupp"});
+    snowflake.execute( {sqlText: "truncate table LAB.CORE_DWH.part"});
+    snowflake.execute( {sqlText: "truncate table LAB.CORE_DWH.customer"});
+    snowflake.execute( {sqlText: "truncate table LAB.CORE_DWH.lineitem"}); 
+            
+  // copy command
+    snowflake.execute( {sqlText: "COPY INTO LAB.CORE_DWH.region FROM @TPCH_DATA/h_region.csv file_format = CSV_COMMAS"});
+    snowflake.execute( {sqlText: "COPY INTO LAB.CORE_DWH.nation FROM @TPCH_DATA/h_nation.csv file_format = CSV_VERTICAL"});
+    snowflake.execute( {sqlText: "COPY INTO LAB.CORE_DWH.supplier FROM (SELECT $1, $2,  $3, $4, $5, REPLACE($6,',','.'), $7 FROM @TPCH_DATA/h_supplier.csv) file_format = CSV_VERTICAL"});
+    snowflake.execute( {sqlText: "COPY INTO LAB.CORE_DWH.part FROM @TPCH_DATA/h_part.csv file_format = CSV_VERTICAL"});    
+    snowflake.execute( {sqlText: "COPY INTO LAB.CORE_DWH.partsupp FROM (SELECT $1, $2,  $3, REPLACE($4,',','.'), $5 FROM @TPCH_DATA/h_partsupp.csv) file_format = CSV_VERTICAL"});
+    snowflake.execute( {sqlText: "COPY INTO LAB.CORE_DWH.orders FROM (SELECT $1, $2,  $3, REPLACE($4,',','.'), REPLACE($5,'.','-'), $6, $7, $8, $9 FROM @TPCH_DATA/h_order.csv) file_format = CSV_VERTICAL"});
+    snowflake.execute( {sqlText: "COPY INTO LAB.CORE_DWH.customer FROM (SELECT $1, $2,  $3, $4, $5, REPLACE($6,',','.'), $7, $8 FROM @TPCH_DATA/h_customer.csv) file_format = CSV_VERTICAL"});
+    snowflake.execute( {sqlText: "COPY INTO LAB.CORE_DWH.lineitem FROM (SELECT $1, $2,  $3, $4, $5, REPLACE($6,',','.'), REPLACE($7,',','.'), REPLACE($8,',','.'), $9, $10,  REPLACE($11,'.','-'), REPLACE($12,'.','-'), REPLACE($13,'.','-'), $14, $15, $16 FROM @TPCH_DATA/h_lineitem.csv)  file_format = CSV_VERTICAL"});
+  
+  return "Succeeded";
+}
+catch (err)  {
+        return "Failed: " + err;
+        }
+$$
+;
+
+-- Create tables for DATA_MART schema (Star Schema)
+CREATE OR REPLACE TABLE LAB.DATA_MART.orders
+(
+  o_orderkey      INTEGER PRIMARY KEY not null,
+  o_orderstatus   CHAR(1),
+  o_totalprice    FLOAT8,
+  o_orderdate     DATE,
+  o_orderpriority CHAR(15),
+  o_clerk         CHAR(15),
+  o_shippriority  INTEGER,
+  o_comment       VARCHAR(79)
+);
+
+CREATE OR REPLACE TABLE LAB.DATA_MART.customer
+(
+  c_custkey    INTEGER PRIMARY KEY not null,
+  c_name       VARCHAR(25),
+  c_address    VARCHAR(40),
+  c_phone      CHAR(15),
+  c_nationkey  INTEGER,
+  n_name       CHAR(27),
+  c_regionkey  INTEGER,
+  r_name       CHAR(25),
+  c_acctbal    FLOAT8,
+  c_mktsegment CHAR(10),
+  c_comment    VARCHAR(117),
+  n_comment    VARCHAR(155),
+  r_comment    VARCHAR(152)
+);
+
+CREATE OR REPLACE TABLE LAB.DATA_MART.part_supplier
+(
+  s_suppkey     INTEGER not null,
+  p_partkey     INTEGER not null,
+  s_name        CHAR(25),
+  s_address     VARCHAR(40),
+  s_nationkey   INTEGER,
+  n_name        CHAR(27),
+  s_regionkey   INTEGER,
+  r_name        CHAR(25),
+  s_phone       CHAR(15),
+  s_acctbal     FLOAT8,
+  s_comment     VARCHAR(101),
+  n_comment     VARCHAR(155),
+  r_comment     VARCHAR(152),
+  p_name        VARCHAR(55),
+  p_mfgr        CHAR(25),
+  p_brand       CHAR(10),
+  p_type        VARCHAR(25),
+  p_size        INTEGER,
+  p_container   CHAR(10),
+  p_retailprice INTEGER,
+  p_comment     VARCHAR(23),
+  ps_availqty   INTEGER,
+  ps_supplycost FLOAT8 not null,
+  ps_comment    VARCHAR(199),
+  constraint pk_part_supplier PRIMARY KEY (s_suppkey, p_partkey)
+);
+
+CREATE OR REPLACE TABLE LAB.DATA_MART.lineitem
+(
+  l_orderkey      INTEGER REFERENCES LAB.DATA_MART.orders(o_orderkey) not null,
+  l_partkey       INTEGER not null,
+  l_suppkey       INTEGER not null,
+  l_custkey       INTEGER REFERENCES LAB.DATA_MART.customer(c_custkey) not null,
+  l_linenumber    INTEGER not null,
+  l_quantity      INTEGER not null,
+  l_extendedprice FLOAT8 not null,
+  l_discount      FLOAT8 not null,
+  l_tax           FLOAT8 not null,
+  l_returnflag    CHAR(1),
+  l_linestatus    CHAR(1),
+  l_shipdate      DATE,
+  l_commitdate    DATE,
+  l_receiptdate   DATE,
+  l_shipinstruct  CHAR(25),
+  l_shipmode      CHAR(10),
+  l_comment       VARCHAR(44),
+  constraint fk_part_supplier FOREIGN KEY (l_partkey, l_suppkey) REFERENCES LAB.DATA_MART.part_supplier(s_suppkey, p_partkey)
+);
+
+-- Create a Stored Procedure to Load Data from CORE_DWH to DATA_MART
+CREATE OR REPLACE PROCEDURE load_datamart()
+returns string
+language javascript
+execute as owner
+as
+$$
+try {
+  //truncate tables before loading
+    snowflake.execute( {sqlText: "truncate table LAB.DATA_MART.orders"});
+    snowflake.execute( {sqlText: "truncate table LAB.DATA_MART.customer"});
+    snowflake.execute( {sqlText: "truncate table LAB.DATA_MART.part_supplier"});
+    snowflake.execute( {sqlText: "truncate table LAB.DATA_MART.lineitem"});
+            
+  // insert command
+    snowflake.execute( {sqlText: "INSERT INTO LAB.DATA_MART.orders SELECT o_orderkey, o_orderstatus, o_totalprice, o_orderdate, o_orderpriority, o_clerk, o_shippriority, o_comment FROM LAB.CORE_DWH.orders"});
+    snowflake.execute( {sqlText: "INSERT INTO LAB.DATA_MART.customer SELECT c.c_custkey, c.c_name, c.c_address, c.c_phone, c.c_nationkey, n.n_name, n.n_regionkey, r.r_name, c.c_acctbal, c.c_mktsegment, c.c_comment, n.n_comment, r.r_comment FROM LAB.CORE_DWH.customer c, LAB.CORE_DWH.nation n, LAB.CORE_DWH.region r WHERE c.c_nationkey = n.n_nationkey AND n.n_regionkey = r.r_regionkey"});
+    snowflake.execute( {sqlText: "INSERT INTO LAB.DATA_MART.part_supplier SELECT s.s_suppkey, p.p_partkey, s.s_name, s.s_address, s.s_nationkey, n.n_name, n.n_regionkey, r.r_name, s.s_phone, s.s_acctbal, s.s_comment, n.n_comment, r.r_comment, p.p_name, p.p_mfgr, p.p_brand, p.p_type, p.p_size, p.p_container, p.p_retailprice, p.p_comment, ps.ps_availqty, ps.ps_supplycost, ps.ps_comment FROM LAB.CORE_DWH.supplier s, LAB.CORE_DWH.part p, LAB.CORE_DWH.partsupp ps, LAB.CORE_DWH.nation n, LAB.CORE_DWH.region r WHERE s.s_suppkey = ps.ps_suppkey AND p.p_partkey = ps.ps_partkey AND s.s_nationkey = n.n_nationkey AND n.n_regionkey = r.r_regionkey"});
+    snowflake.execute( {sqlText: "INSERT INTO LAB.DATA_MART.lineitem SELECT l.l_orderkey, l.l_partkey, l.l_suppkey, o.o_custkey, l.l_linenumber, l.l_quantity, l.l_extendedprice, l.l_discount, l.l_tax, l.l_returnflag, l.l_linestatus, l.l_shipdate, l.l_commitdate,l.l_receiptdate, l.l_shipinstruct, l.l_shipmode, l.l_comment FROM LAB.CORE_DWH.lineitem l, LAB.CORE_DWH.orders o WHERE l.l_orderkey = o.o_orderkey"});
+  
+  return "Succeeded";
+}
+catch (err)  {
+        return "Failed: " + err;
+        }
+$$
+;
+
+-- Create Tasks for Continuous Loading
+CREATE OR REPLACE TASK load_coredwh --root task
+    SCHEDULE = '10 minutes'
+AS
+CALL load_coredwh();
+
+CREATE OR REPLACE TASK load_datamart
+    AFTER load_coredwh --child task
+    WHEN SYSTEM$STREAM_HAS_DATA('new_region')
+     AND SYSTEM$STREAM_HAS_DATA('new_nation')
+     AND SYSTEM$STREAM_HAS_DATA('new_supplier')
+     AND SYSTEM$STREAM_HAS_DATA('new_orders')
+     AND SYSTEM$STREAM_HAS_DATA('new_partsupp')
+     AND SYSTEM$STREAM_HAS_DATA('new_part')
+     AND SYSTEM$STREAM_HAS_DATA('new_customer')
+     AND SYSTEM$STREAM_HAS_DATA('new_lineitem')
+AS 
+CALL load_datamart();
+
+-- Execute Tasks for Continuous Loading
+ALTER TASK load_datamart RESUME;
+ALTER TASK load_coredwh RESUME;
+--SUSPEND to stop the Task
+
+SHOW TASKS;
+
+select *
+  from table(information_schema.task_history())
+  order by scheduled_time;
+
+
+-- Create Different Warehouses (check performance)
+
+CREATE OR REPLACE WAREHOUSE COMPUTE_WH_L
+WAREHOUSE_SIZE = LARGE
+AUTO_SUSPEND = 10
+AUTO_RESUME = TRUE; 
+
+CREATE OR REPLACE WAREHOUSE COMPUTE_WH_XS
+WAREHOUSE_SIZE = XSMALL
+AUTO_SUSPEND = 10
+AUTO_RESUME = TRUE; 
+
+SHOW WAREHOUSES;
+
+USE WAREHOUSE COMPUTE_WH_L;
+TRUNCATE TABLE LAB.CORE_DWH.customer;
+COPY INTO LAB.CORE_DWH.customer 
+FROM (SELECT $1, $2,  $3, $4, $5, REPLACE($6,',','.'), $7, $8 
+      FROM @TPCH_DATA/h_customer.csv) file_format = CSV_VERTICAL;
+
+USE WAREHOUSE COMPUTE_WH_XS;
+TRUNCATE TABLE LAB.CORE_DWH.customer;
+COPY INTO LAB.CORE_DWH.customer 
+FROM (SELECT $1, $2,  $3, $4, $5, REPLACE($6,',','.'), $7, $8 
+      FROM @TPCH_DATA/h_customer.csv) file_format = CSV_VERTICAL;
+
+-- Test Different Types of Cache
+
+-- Metadata Cache
+SELECT COUNT(*) FROM LAB.CORE_DWH.customer;
+
+-- Result Cache
+-- Execute 2 times to get the result cache
+SELECT c_name FROM LAB.CORE_DWH.customer;
+
+-- Warehouse Cache
+SELECT c_name as first_name FROM LAB.CORE_DWH.customer;
